@@ -67,7 +67,7 @@
             grid-template-columns: 1fr;
         }
 
-        input {
+        input, select, textarea {
             font-family: inherit;
             width: 100%;
             padding: 10px 12px;
@@ -77,9 +77,10 @@
             font-size: 14px;
             outline: none;
             transition: border-color 0.2s;
+            background: #fff;
         }
 
-        input:focus {
+        input:focus, select:focus, textarea:focus {
             border-color: var(--primary-color);
             box-shadow: 0 0 0 3px rgba(46, 125, 50, 0.1);
         }
@@ -118,6 +119,13 @@
             background: #c8e6c9;
         }
 
+        button.danger {
+            background: #c62828;
+        }
+        button.danger:hover {
+            background: #b71c1c;
+        }
+
         pre {
             background: #f8f9fa;
             color: #212529;
@@ -144,15 +152,45 @@
         .output-section {
             border-left: 5px solid var(--primary-color);
         }
+
+        .ws-banner {
+            background: #fff3cd;
+            border: 1px solid #ffeeba;
+            color: #856404;
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-size: 13px;
+            display: none;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+
+        th, td {
+            border: 1px solid #e0e0e0;
+            padding: 8px 12px;
+            text-align: left;
+        }
+
+        th {
+            background: #f5f5f5;
+            color: #333;
+        }
     </style>
 </head>
 <body>
 
     <header>
         <h1>School</h1>
-        <p>Электронный дневник — Уроки 1 & 2</p>
+        <p>Электронный дневник — Полная система</p>
     </header>
 
+    <div id="wsNotification" class="ws-banner"></div>
     <section>
         <h2>1. Авторизация</h2>
         <div class="form-group full">
@@ -166,6 +204,7 @@
         <p style="margin: 10px 0 2px 0; font-size: 13px; color: #666;">Текущий токен:</p>
         <div id="tokenDisplay" class="token-box">нет токена</div>
     </section>
+
 
     <section>
         <h2>2. Управление учениками</h2>
@@ -181,6 +220,75 @@
             <button onclick="createStudent()">Создать ученика</button>
             <button class="secondary" onclick="getStudents()">Получить список</button>
         </div>
+        <div id="studentsListContainer"></div>
+    </section>
+
+    <section>
+        <h2>3. Учителя и Предметы</h2>
+        <div class="form-group">
+            <input type="text" id="teachName" placeholder="Имя учителя">
+            <input type="email" id="teachEmail" placeholder="Email учителя">
+        </div>
+        <div class="btn-container">
+            <button onclick="createTeacher()">Добавить учителя</button>
+            <button class="secondary" onclick="getTeachers()">Список учителей</button>
+        </div>
+        <hr style="border:0; border-top:1px solid #eee; margin: 15px 0;">
+        <div class="form-group">
+            <input type="text" id="subjTitle" placeholder="Название предмета">
+            <input type="number" id="subjTeacherId" placeholder="ID преподавателя">
+        </div>
+        <div class="btn-container">
+            <button onclick="createSubject()">Создать предмет</button>
+            <button class="secondary" onclick="getSubjects()">Список предметов</button>
+        </div>
+    </section>
+    <section>
+        <h2>4. Электронный дневник (Оценки)</h2>
+        <div class="form-group">
+            <input type="number" id="gradeStudentId" placeholder="ID ученика">
+            <input type="number" id="gradeSubjectId" placeholder="ID предмета">
+        </div>
+        <div class="form-group">
+            <input type="number" id="gradeValue" placeholder="Оценка (1-5)" min="1" max="5">
+            <input type="date" id="gradeDate">
+        </div>
+        <div class="form-group full">
+            <input type="text" id="gradeComment" placeholder="Комментарий к оценке">
+        </div>
+        <div class="btn-container">
+            <button onclick="createGrade()">Поставить оценку</button>
+        </div>
+        <hr style="border:0; border-top:1px solid #eee; margin: 15px 0;">
+        <div class="form-group">
+            <input type="number" id="diaryStudentId" placeholder="ID ученика для просмотра">
+            <input type="number" id="diarySubjectId" placeholder="ID предмета (фильтр, необязательно)">
+        </div>
+        <div class="btn-container">
+            <button class="secondary" onclick="getStudentDiary()">Загрузить дневник</button>
+        </div>
+        <div id="diaryContainer"></div>
+    </section>
+
+
+    <section>
+        <h2>5. Домашние задания</h2>
+        <div class="form-group">
+            <input type="number" id="hwSubjectId" placeholder="ID предмета">
+            <input type="text" id="hwTitle" placeholder="Заголовок задания">
+        </div>
+        <div class="form-group">
+            <input type="date" id="hwIssued" placeholder="Дата выдачи">
+            <input type="date" id="hwDeadline" placeholder="Дедлайн">
+        </div>
+        <div class="form-group full">
+            <textarea id="hwDesc" placeholder="Описание задания"></textarea>
+        </div>
+        <div class="btn-container">
+            <button onclick="createHomework()">Добавить ДЗ</button>
+            <button class="secondary" onclick="getHomeworks()">Список ДЗ</button>
+        </div>
+        <div id="hwContainer"></div>
     </section>
 
     <section class="output-section">
@@ -188,53 +296,191 @@
         <pre id="output">Здесь появится результат запроса...</pre>
     </section>
 
-<script>
-let token = "";
+ <script>
+ let token = "";
+ let ws = null;
 
-async function request(url, method = 'GET', data = null) {
-    let headers = { 'Content-Type': 'application/json' };
-    if (token) headers['Authorization'] = token;
-    
-    let options = { method, headers };
-    if (data) options.body = JSON.stringify(data);
+ function initWebSocket() {
+     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+     ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
-    try {
-        let res = await fetch(url, options);
-        let json = await res.json();
-        document.getElementById('output').innerText = JSON.stringify(json, null, 2);
-        return json;
-    } catch(e) {
-        document.getElementById('output').innerText = "Ошибка: " + e.message;
-    }
-}
+     ws.onmessage = function(event) {
+         try {
+             let packet = JSON.parse(event.data);
+             showNotification(packet.message || `Событие: ${packet.type}`);
 
-async function register() {
-    let email = document.getElementById('regEmail').value;
-    let password = document.getElementById('regPass').value;
-    await request('/auth/register', 'POST', { email, password });
-}
 
-async function login() {
-    let email = document.getElementById('regEmail').value;
-    let password = document.getElementById('regPass').value;
-    let res = await request('/auth/login', 'POST', { email, password });
-    if (res && res.token) {
-        token = res.token;
-        document.getElementById('tokenDisplay').innerText = token;
-    }
-}
+             if (packet.type === 'grade.created') {
+                 let activeStudentId = document.getElementById('diaryStudentId').value;
+                 if (activeStudentId && packet.data.student_id == activeStudentId) {
+                     getStudentDiary();
+                 }
+             } else if (packet.type === 'homework.created') {
+                 getHomeworks();
+             } else if (packet.type === 'student.updated') {
+                 getStudents();
+             }
+         } catch(e) {
+             console.error("WS parse error", e);
+         }
+     };
 
-async function createStudent() {
-    let full_name = document.getElementById('studName').value;
-    let student_class = document.getElementById('studClass').value;
-    let age = parseInt(document.getElementById('studAge').value) || 0;
-    let email = document.getElementById('studEmail').value;
-    await request('/students', 'POST', { full_name, class: student_class, age, email });
-}
+     ws.onclose = function() {
+         setTimeout(initWebSocket, 3000);
+     };
+ }
 
-async function getStudents() {
-    await request('/students', 'GET');
-}
-</script>
-</body>
+ function showNotification(text) {
+     let banner = document.getElementById('wsNotification');
+     banner.innerText = "🔔 Уведомление: " + text;
+     banner.style.display = 'block';
+     setTimeout(() => {
+         banner.style.display = 'none';
+     }, 5000);
+ }
+
+ async function request(url, method = 'GET', data = null) {
+     let headers = { 'Content-Type': 'application/json' };
+     if (token) headers['Authorization'] = token;
+     
+     let options = { method, headers };
+     if (data) options.body = JSON.stringify(data);
+
+     try {
+         let res = await fetch(url, options);
+         let json;
+         try {
+             json = await res.json();
+         } catch {
+             json = { status: res.status };
+         }
+
+         if (!res.ok) {
+             throw new Error(json.error || `Ошибка сервера: ${res.status}`);
+         }
+
+         document.getElementById('output').innerText = JSON.stringify(json, null, 2);
+         return json;
+     } catch(e) {
+         document.getElementById('output').innerText = "Ошибка: " + e.message;
+         alert("Ошибка запроса: " + e.message);
+         return null;
+     }
+ }
+
+ async function register() {
+     let email = document.getElementById('regEmail').value;
+     let password = document.getElementById('regPass').value;
+     await request('/auth/register', 'POST', { email, password });
+ }
+
+ async function login() {
+     let email = document.getElementById('regEmail').value;
+     let password = document.getElementById('regPass').value;
+     let res = await request('/auth/login', 'POST', { email, password });
+     if (res && res.token) {
+         token = res.token;
+         document.getElementById('tokenDisplay').innerText = token;
+         initWebSocket();
+     }
+ }
+
+ async function createStudent() {
+     let full_name = document.getElementById('studName').value;
+     let student_class = document.getElementById('studClass').value;
+     let age = parseInt(document.getElementById('studAge').value) || 0;
+     let email = document.getElementById('studEmail').value;
+     await request('/students', 'POST', { full_name, class: student_class, age, email });
+     getStudents();
+ }
+
+ async function getStudents() {
+     let data = await request('/students', 'GET');
+     if (!data) return;
+     let html = `<table><tr><th>ID</th><th>ФИО</th><th>Класс</th><th>Действия</th></tr>`;
+     data.forEach(s => {
+         html += `<tr><td>${s.id}</td><td>${s.full_name}</td><td>${s.class}</td><td><button class="danger" onclick="deleteStudent(${s.id})">Удалить</button></td></tr>`;
+     });
+     html += `</table>`;
+     document.getElementById('studentsListContainer').innerHTML = html;
+ }
+
+ async function deleteStudent(id) {
+     await request(`/students/${id}`, 'DELETE');
+     getStudents();
+ }
+
+ async function createTeacher() {
+     let name = document.getElementById('teachName').value;
+     let email = document.getElementById('teachEmail').value;
+     await request('/teachers', 'POST', { name, email });
+ }
+
+ async function getTeachers() {
+     await request('/teachers', 'GET');
+ }
+
+ async function createSubject() {
+     let title = document.getElementById('subjTitle').value;
+     let teacher_id = parseInt(document.getElementById('subjTeacherId').value) || 0;
+     await request('/subjects', 'POST', { title, teacher_id });
+ }
+
+ async function getSubjects() {
+     await request('/subjects', 'GET');
+ }
+
+ async function createGrade() {
+     let student_id = parseInt(document.getElementById('gradeStudentId').value) || 0;
+     let subject_id = parseInt(document.getElementById('gradeSubjectId').value) || 0;
+     let value = parseInt(document.getElementById('gradeValue').value) || 0;
+     let date = document.getElementById('gradeDate').value;
+     let comment = document.getElementById('gradeComment').value;
+     await request('/grades', 'POST', { student_id, subject_id, value, date, comment });
+ }
+
+ async function getStudentDiary() {
+     let student_id = document.getElementById('diaryStudentId').value;
+     let subject_id = document.getElementById('diarySubjectId').value;
+     if (!student_id) {
+         alert("Укажите ID ученика");
+         return;
+     }
+     let url = `/students/${student_id}/grades`;
+     if (subject_id) {
+         url += `?subject_id=${subject_id}`;
+     }
+     let data = await request(url, 'GET');
+     if (!data) return;
+
+     let html = `<table><tr><th>ID оценки</th><th>Предмет ID</th><th>Оценка</th><th>Дата</th><th>Комментарий</th></tr>`;
+     data.forEach(g => {
+         html += `<tr><td>${g.id}</td><td>${g.subject_id}</td><td><b>${g.value}</b></td><td>${g.date}</td><td>${g.comment}</td></tr>`;
+     });
+     html += `</table>`;
+     document.getElementById('diaryContainer').innerHTML = html;
+ }
+
+ async function createHomework() {
+     let subject_id = parseInt(document.getElementById('hwSubjectId').value) || 0;
+     let title = document.getElementById('hwTitle').value;
+     let description = document.getElementById('hwDesc').value;
+     let issued_date = document.getElementById('hwIssued').value;
+     let deadline = document.getElementById('hwDeadline').value;
+     await request('/homework', 'POST', { subject_id, title, description, issued_date, deadline });
+     getHomeworks();
+ }
+
+ async function getHomeworks() {
+     let data = await request('/homework', 'GET');
+     if (!data) return;
+     let html = `<table><tr><th>ID</th><th>Предмет ID</th><th>Задание</th><th>Дедлайн</th></tr>`;
+     data.forEach(hw => {
+         html += `<tr><td>${hw.id}</td><td>${hw.subject_id}</td><td><b>${hw.title}</b><br><small>${hw.description}</small></td><td>${hw.deadline}</td></tr>`;
+     });
+     html += `</table>`;
+     document.getElementById('hwContainer').innerHTML = html;
+ }
+ </script>
+ </body>
 </html>
