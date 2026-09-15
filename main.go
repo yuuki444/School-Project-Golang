@@ -6,8 +6,9 @@ import (
 	"net/http"
 	"sync"
 	"time"
-)
 
+	"github.com/gorilla/websocket"
+)
 
 type User struct {
 	ID           int    `json:"id"`
@@ -51,14 +52,18 @@ type Homework struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	IssuedDate  string `json:"issued_date"`
-	Deadline    string `json:"deadline"` 
+	Deadline    string `json:"deadline"`
 }
 
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-
+type WSMessage struct {
+	Type    string      `json:"type"`
+	Message string      `json:"message,omitempty"`
+	Data    interface{} `json:"data"`
+}
 
 type DB struct {
 	mu        sync.Mutex
@@ -69,6 +74,7 @@ type DB struct {
 	grades    map[int]Grade
 	homeworks map[int]Homework
 	tokens    map[string]int
+	clients   map[*websocket.Conn]bool
 
 	userSeq  int
 	studSeq  int
@@ -87,8 +93,54 @@ var db = &DB{
 	grades:    make(map[int]Grade),
 	homeworks: make(map[int]Homework),
 	tokens:    make(map[string]int),
+	clients:   make(map[*websocket.Conn]bool),
 }
 
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+func broadcastWS(msgType string, message string, data interface{}) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	msg, err := json.Marshal(WSMessage{
+		Type:    msgType,
+		Message: message,
+		Data:    data,
+	})
+	if err != nil {
+		return
+	}
+
+	for client := range db.clients {
+		client.WriteMessage(websocket.TextMessage, msg)
+	}
+}
+
+func handleWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	db.mu.Lock()
+	db.clients[conn] = true
+	db.mu.Unlock()
+
+	defer func() {
+		db.mu.Lock()
+		delete(db.clients, conn)
+		db.mu.Unlock()
+		conn.Close()
+	}()
+
+	for {
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+	}
+}
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -134,7 +186,6 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 	}
 }
-
 
 func handleRegister(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -204,7 +255,6 @@ func handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, user)
 }
 
-
 func handleStudents(w http.ResponseWriter, r *http.Request) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -230,11 +280,12 @@ func handleCreateStudent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	db.studSeq++
 	s.ID = db.studSeq
 	db.students[s.ID] = s
+	db.mu.Unlock()
+
+	broadcastWS("student.updated", "Добавлен новый ученик", s)
 	writeJSON(w, http.StatusCreated, s)
 }
 
@@ -246,9 +297,9 @@ func handleStudentItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	s, exists := db.students[id]
+	db.mu.Unlock()
+
 	if !exists {
 		writeError(w, http.StatusNotFound, "Student not found")
 		return
@@ -264,10 +315,18 @@ func handleStudentItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		updated.ID = id
+		db.mu.Lock()
 		db.students[id] = updated
+		db.mu.Unlock()
+
+		broadcastWS("student.updated", "Профиль ученика обновлен", updated)
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
+		db.mu.Lock()
 		delete(db.students, id)
+		db.mu.Unlock()
+
+		broadcastWS("student.updated", "Ученик удален", map[string]int{"id": id})
 		w.WriteHeader(http.StatusOK)
 	}
 }
@@ -294,11 +353,11 @@ func handleCreateTeacher(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	db.teachSeq++
 	t.ID = db.teachSeq
 	db.teachers[t.ID] = t
+	db.mu.Unlock()
+
 	writeJSON(w, http.StatusCreated, t)
 }
 
@@ -310,9 +369,9 @@ func handleTeacherItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	t, exists := db.teachers[id]
+	db.mu.Unlock()
+
 	if !exists {
 		writeError(w, http.StatusNotFound, "Teacher not found")
 		return
@@ -328,14 +387,17 @@ func handleTeacherItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		updated.ID = id
+		db.mu.Lock()
 		db.teachers[id] = updated
+		db.mu.Unlock()
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
+		db.mu.Lock()
 		delete(db.teachers, id)
+		db.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}
 }
-
 
 func handleSubjects(w http.ResponseWriter, r *http.Request) {
 	db.mu.Lock()
@@ -359,9 +421,8 @@ func handleCreateSubject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	if _, ok := db.teachers[sub.TeacherID]; !ok {
+		db.mu.Unlock()
 		writeError(w, http.StatusBadRequest, "Teacher not found")
 		return
 	}
@@ -369,6 +430,8 @@ func handleCreateSubject(w http.ResponseWriter, r *http.Request) {
 	db.subjSeq++
 	sub.ID = db.subjSeq
 	db.subjects[sub.ID] = sub
+	db.mu.Unlock()
+
 	writeJSON(w, http.StatusCreated, sub)
 }
 
@@ -380,9 +443,9 @@ func handleSubjectItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	sub, exists := db.subjects[id]
+	db.mu.Unlock()
+
 	if !exists {
 		writeError(w, http.StatusNotFound, "Subject not found")
 		return
@@ -397,19 +460,23 @@ func handleSubjectItem(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "Invalid body")
 			return
 		}
+		db.mu.Lock()
 		if _, ok := db.teachers[updated.TeacherID]; !ok {
+			db.mu.Unlock()
 			writeError(w, http.StatusBadRequest, "Teacher not found")
 			return
 		}
 		updated.ID = id
 		db.subjects[id] = updated
+		db.mu.Unlock()
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
+		db.mu.Lock()
 		delete(db.subjects, id)
+		db.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}
 }
-
 
 func handleGrades(w http.ResponseWriter, r *http.Request) {
 	db.mu.Lock()
@@ -438,13 +505,13 @@ func handleCreateGrade(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	if _, ok := db.students[g.StudentID]; !ok {
+		db.mu.Unlock()
 		writeError(w, http.StatusBadRequest, "Student not found")
 		return
 	}
 	if _, ok := db.subjects[g.SubjectID]; !ok {
+		db.mu.Unlock()
 		writeError(w, http.StatusBadRequest, "Subject not found")
 		return
 	}
@@ -452,6 +519,9 @@ func handleCreateGrade(w http.ResponseWriter, r *http.Request) {
 	db.gradeSeq++
 	g.ID = db.gradeSeq
 	db.grades[g.ID] = g
+	db.mu.Unlock()
+
+	broadcastWS("grade.created", "Добавлена новая оценка", g)
 	writeJSON(w, http.StatusCreated, g)
 }
 
@@ -498,9 +568,9 @@ func handleGradeItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	g, exists := db.grades[id]
+	db.mu.Unlock()
+
 	if !exists {
 		writeError(w, http.StatusNotFound, "Grade not found")
 		return
@@ -510,11 +580,12 @@ func handleGradeItem(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, g)
 	case http.MethodDelete:
+		db.mu.Lock()
 		delete(db.grades, id)
+		db.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}
 }
-
 
 func handleHomeworks(w http.ResponseWriter, r *http.Request) {
 	subjectFilterStr := r.URL.Query().Get("subject_id")
@@ -530,16 +601,13 @@ func handleHomeworks(w http.ResponseWriter, r *http.Request) {
 	defer db.mu.Unlock()
 
 	now := time.Now().Format("2006-01-02")
-
 	var res []Homework
 	for _, hw := range db.homeworks {
 		matchSub := (subFilter == 0 || hw.SubjectID == subFilter)
 		matchOverdue := true
-
 		if isOverdue {
 			matchOverdue = hw.Deadline < now
 		}
-
 		if matchSub && matchOverdue {
 			res = append(res, hw)
 		}
@@ -565,9 +633,8 @@ func handleCreateHomework(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	if _, ok := db.subjects[hw.SubjectID]; !ok {
+		db.mu.Unlock()
 		writeError(w, http.StatusBadRequest, "Subject not found")
 		return
 	}
@@ -575,6 +642,9 @@ func handleCreateHomework(w http.ResponseWriter, r *http.Request) {
 	db.hwSeq++
 	hw.ID = db.hwSeq
 	db.homeworks[hw.ID] = hw
+	db.mu.Unlock()
+
+	broadcastWS("homework.created", "Добавлено новое домашнее задание", hw)
 	writeJSON(w, http.StatusCreated, hw)
 }
 
@@ -586,9 +656,9 @@ func handleHomeworkItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	hw, exists := db.homeworks[id]
+	db.mu.Unlock()
+
 	if !exists {
 		writeError(w, http.StatusNotFound, "Homework not found")
 		return
@@ -598,7 +668,9 @@ func handleHomeworkItem(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, hw)
 	case http.MethodDelete:
+		db.mu.Lock()
 		delete(db.homeworks, id)
+		db.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}
 }
@@ -613,6 +685,8 @@ func main() {
 		}
 		http.ServeFile(w, r, "index.html")
 	})
+
+	mux.HandleFunc("GET /ws", handleWS)
 
 	mux.HandleFunc("POST /auth/register", handleRegister)
 	mux.HandleFunc("POST /auth/login", handleLogin)
@@ -630,7 +704,6 @@ func main() {
 	mux.HandleFunc("GET /teachers/{id}", authMiddleware(handleTeacherItem))
 	mux.HandleFunc("PUT /teachers/{id}", authMiddleware(handleTeacherItem))
 	mux.HandleFunc("DELETE /teachers/{id}", authMiddleware(handleTeacherItem))
-
 
 	mux.HandleFunc("GET /subjects", authMiddleware(handleSubjects))
 	mux.HandleFunc("POST /subjects", authMiddleware(handleCreateSubject))
